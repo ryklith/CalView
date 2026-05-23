@@ -1,113 +1,62 @@
-// src/caldavService.js
 import IcalExpander from 'ical-expander';
+import { CALENDAR_URL } from './lib/config';
+import { getCachedIcs, setCachedIcs, clearCachedIcs } from './lib/cache';
 
-const username = process.env.REACT_APP_RADICALE_USERNAME;
-const password = process.env.REACT_APP_RADICALE_PASSWORD;
-const serverUrl = process.env.REACT_APP_RADICALE_URL;
+export async function fetchRawIcs({ bypassCache = false } = {}) {
+  if (!bypassCache) {
+    const cached = getCachedIcs();
+    if (cached) return cached;
+  }
 
-if (!username || !password || !serverUrl) {
-  throw new Error("Missing environment variables for Radicale server credentials");
+  const response = await fetch(CALENDAR_URL, { method: 'GET' });
+  if (!response.ok) {
+    throw new Error(`Calendar fetch failed: HTTP ${response.status}`);
+  }
+  const ics = await response.text();
+  setCachedIcs(ics);
+  return ics;
 }
 
-const fetchEvents = async () => {
-  try {
-    const response = await fetch(serverUrl, {
-      headers: {
-        'Authorization': 'Basic ' + btoa(username+':'+password),
-      }
-    });
+export function refreshIcs() {
+  clearCachedIcs();
+  return fetchRawIcs({ bypassCache: true });
+}
 
-    if (!response.ok) {
-      throw new Error('Network response was not ok');
-    }
+let cachedExpander = null;
+let cachedIcsRef = null;
 
-    const icsData = await response.text();
-    const icalExpander = new IcalExpander({ ics: icsData, maxIterations: 1000 });
-    const events = icalExpander.all();
+function getExpander(ics) {
+  if (cachedExpander && cachedIcsRef === ics) return cachedExpander;
+  cachedExpander = new IcalExpander({ ics, maxIterations: 1000 });
+  cachedIcsRef = ics;
+  return cachedExpander;
+}
 
-    const calendarEvents = events.events.map(event => ({
-      id: event.uid,
-      title: event.summary,
-      startDate: event.startDate.toJSDate().toISOString(),
-      endDate: event.endDate.toJSDate().toISOString(),
-      description: event.description || '',
-      etag: event.etag || '', // Include the ETag if available
-    }));
+function normalize(item, startDate, endDate) {
+  const isAllDay = startDate.isDate === true;
+  return {
+    id: `${item.uid}__${startDate.toJSDate().getTime()}`,
+    uid: item.uid,
+    title: item.summary || '(ohne Titel)',
+    start: startDate.toJSDate(),
+    end: endDate.toJSDate(),
+    allDay: isAllDay,
+    location: item.location || '',
+    description: item.description || '',
+  };
+}
 
-    return calendarEvents;
-  } catch (error) {
-    console.error('Error fetching events:', error);
-    throw error;
+export function expandEventsBetween(ics, start, end) {
+  const expander = getExpander(ics);
+  const { events, occurrences } = expander.between(start, end);
+
+  const out = [];
+  for (const e of events) {
+    out.push(normalize(e, e.startDate, e.endDate));
   }
-};
-
-const generateUUID = () => {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-};
-
-const saveEventToRadicale = async (event) => {
-  const eventId = event.id || generateUUID();
-  const filename = `${eventId}.ics`;
-  const url = `${serverUrl}${filename}`;
-
-  const icalString = `BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//hacksw/handcal//NONSGML v1.0//EN
-BEGIN:VEVENT
-UID:${eventId}
-DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'}
-DTSTART:${new Date(event.startDate).toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'}
-DTEND:${new Date(event.endDate).toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'}
-SUMMARY:${event.title || ''}
-DESCRIPTION:${event.description || ''}
-END:VEVENT
-END:VCALENDAR`;
-
-  try {
-    const response = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'text/calendar; charset=utf-8',
-        'Authorization': 'Basic ' + btoa(username + ':' + password)
-      },
-      body: icalString
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    console.log('Event created successfully');
-    return filename; // Return the full filename
-  } catch (error) {
-    console.error('Error creating event:', error);
-    throw error;
+  for (const o of occurrences) {
+    out.push(normalize(o.item, o.startDate, o.endDate));
   }
-};
-
-const deleteEventFromRadicale = async (eventId) => {
-  const url = `${serverUrl}${eventId}.ics`;
-
-  try {
-    const response = await fetch(url, {
-      method: 'DELETE',
-      headers: {
-        'Authorization': 'Basic ' + btoa(`${username}:${password}`),
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    console.log('Event deleted successfully from server');
-  } catch (error) {
-    console.error('Error deleting event from server:', error);
-    throw error;
-  }
-};
-
-export { fetchEvents, saveEventToRadicale, deleteEventFromRadicale };
+  out.sort((a, b) => a.start - b.start);
+  return out;
+}

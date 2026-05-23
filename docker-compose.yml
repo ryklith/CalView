@@ -1,11 +1,11 @@
-version: '3'
 services:
   app:
     build:
       context: .
       args:
-        - REACT_APP_RADICALE_USERNAME=${REACT_APP_RADICALE_USERNAME}
-        - REACT_APP_RADICALE_PASSWORD=${REACT_APP_RADICALE_PASSWORD}
-        - REACT_APP_RADICALE_URL=${REACT_APP_RADICALE_URL}
+        # Optional: override the calendar URL at build time.
+        # If unset, the default in src/lib/config.js is used.
+        - REACT_APP_CALENDAR_URL=${REACT_APP_CALENDAR_URL:-}
     ports:
       - "80:80"
+    restart: unless-stopped
